@@ -39,6 +39,10 @@ Item {
   // to the password even when a sensor is enrolled. Refreshed per request.
   property bool laptopClosed: false
   property int shakeOffset: 0
+  // Hyprland holds the Caps Lock state and Quickshell has no signal for it, so
+  // the dialog asks when it takes focus and after each Caps Lock key press.
+  property bool capsLockOn: false
+  property bool capsLockRefreshPending: false
 
   readonly property bool dialogVisible: polkitAgent.isActive || closing
   // We show one method at a time. Fingerprint owns the dialog while PAM is
@@ -61,6 +65,27 @@ Item {
 
   function refreshLidState() {
     if (!laptopClosedProc.running) laptopClosedProc.running = true
+  }
+
+  function refreshCapsLock() {
+    if (capsLockProc.running) capsLockRefreshPending = true
+    else capsLockProc.running = true
+  }
+
+  function applyCapsLock(text) {
+    var devices
+    try {
+      devices = JSON.parse(String(text || ""))
+    } catch (error) {
+      return
+    }
+    var keyboards = devices && Array.isArray(devices.keyboards) ? devices.keyboards : []
+    for (var i = 0; i < keyboards.length; i++) {
+      if (keyboards[i] && keyboards[i].main) {
+        capsLockOn = !!keyboards[i].capsLock
+        return
+      }
+    }
   }
 
   function resetSnapshot() {
@@ -101,6 +126,7 @@ Item {
 
   function refocus() {
     if (!dialogVisible) return
+    refreshCapsLock()
     // In fingerprint mode there is no field to type into — park focus on the
     // key catcher so Escape still cancels; otherwise focus the password field.
     if (fingerprintMode) keyCatcher.forceActiveFocus()
@@ -172,6 +198,19 @@ Item {
     command: ["bash", "-c", "omarchy-hw-laptop-closed && echo closed || echo open"]
     stdout: StdioCollector { id: laptopClosedOut; waitForEnd: true }
     onExited: root.laptopClosed = String(laptopClosedOut.text || "").trim() === "closed"
+  }
+
+  Process {
+    id: capsLockProc
+    command: ["hyprctl", "devices", "-j"]
+    stdout: StdioCollector {
+      onStreamFinished: root.applyCapsLock(text)
+    }
+    onExited: {
+      if (!root.capsLockRefreshPending) return
+      root.capsLockRefreshPending = false
+      root.refreshCapsLock()
+    }
   }
 
   PolkitAgent {
@@ -271,6 +310,11 @@ Item {
             event.accepted = true
           }
         }
+        // Focus sits here while a password is checked, so keep the Caps Lock
+        // state current for when the field comes back.
+        Keys.onReleased: function(event) {
+          if (event.key === Qt.Key_CapsLock) root.refreshCapsLock()
+        }
       }
 
       // Fingerprint mode shows just the sensor icon, centered and alone \u2014 no
@@ -334,6 +378,11 @@ Item {
                 event.accepted = true
               }
             }
+            // XKB turns Caps Lock off on the key's release, so ask for the
+            // state only once the key is up.
+            Keys.onReleased: function(event) {
+              if (event.key === Qt.Key_CapsLock) root.refreshCapsLock()
+            }
           }
 
           Text {
@@ -366,6 +415,29 @@ Item {
             onClicked: passwordInput.forceActiveFocus()
           }
         }
+      }
+    }
+
+    // A password typed with Caps Lock on fails with no hint why, so flag it
+    // right under the field before the user burns through attempts.
+    Rectangle {
+      width: Style.space(28)
+      height: Style.space(28)
+      anchors.horizontalCenter: card.horizontalCenter
+      anchors.top: card.bottom
+      anchors.topMargin: Style.space(10)
+      radius: root.cornerRadius
+      color: root.background
+      visible: root.capsLockOn && !root.fingerprintMode
+
+      Text {
+        anchors.fill: parent
+        text: "\udb81\ude32"
+        color: Commons.Color.polkit.textError
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.icon
+        horizontalAlignment: Text.AlignHCenter
+        verticalAlignment: Text.AlignVCenter
       }
     }
 
